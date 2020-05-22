@@ -85,7 +85,6 @@ PyPlc_dealloc(PyPlcObject *self)
 static char *wrmsg_list0 = "Empty argument list.";
 static char *wrmsg_listmax = "Argument list size exceeds %d bytes.";
 static char *wrmsg_val = "Non-Int/Long value in arguments: %x.";
-static char *wrmsg_oom = "Out of memory.";
 
 PyDoc_STRVAR(PyPlcOpenDoc,
 	"open(bus, device)\n\n"
@@ -129,6 +128,18 @@ PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
 	}
 	self->max_speed_hz = tmp32;
 
+    // GPIOs
+    if(self->ldo==0 || self->rst==0 || self->irq==0) {
+        PyErr_SetString(PyExc_TypeError,
+            "Aux pins not configured");
+        return NULL;
+    } 
+
+    setup_gpio(self->ldo, OUTPUT, 0);
+    setup_gpio(self->rst, OUTPUT, 0);
+    setup_gpio(self->irq, INPUT, 0);
+    pl360_init(self);
+
 	Py_INCREF(Py_None);
 	return Py_None;
 }
@@ -140,7 +151,6 @@ PyDoc_STRVAR(PyPlcTxDoc,
 static PyObject *
 PyPlc_tx(PyPlcObject *self, PyObject *args)
 {
-	int		status;
 	uint16_t	ii, len;
 	uint8_t	buf[PYPLC_MAX_BLOCK_SIZE];
 	PyObject	*obj;
@@ -176,17 +186,7 @@ PyPlc_tx(PyPlcObject *self, PyObject *args)
 
 	Py_DECREF(seq);
 
-    status = pl360_transfer(self, &buf[0], len);
-
-    if (status < 0) {
-		PyErr_SetFromErrno(PyExc_IOError);
-		return NULL;
-	}
-
-	if (status != len) {
-		perror("short write");
-		return NULL;
-	}
+    pl360_tx(self, &buf[0], len);
 
     Py_INCREF(Py_None);
 	return Py_None;
@@ -204,13 +204,14 @@ PyPlc_init(PyPlcObject *self, PyObject *args, PyObject *kwds)
 			kwlist, &bus, &client))
 		return -1;
 
+    gpio_setup();
+
 	if (bus >= 0) {
 		PyPlc_open(self, args, kwds);
 		if (PyErr_Occurred())
 			return -1;
 	}
 
-    gpio_setup();
 	return 0;
 }
 
@@ -243,6 +244,7 @@ PyObject *PyPlc_exit(PyPlcObject *self, PyObject *args)
     }
 
     PyPlc_close(self);
+    gpio_cleanup();
     Py_RETURN_FALSE;
 }
 
@@ -308,11 +310,111 @@ PyPlc_set_pin_rst(PyPlcObject *self, PyObject *val, void *closure)
     return 0;
 }
 
+static PyObject *
+PyPlc_get_pin_cs(PyPlcObject *self, void *closure)
+{
+	PyObject *result = Py_BuildValue("i", self->cs);
+	Py_INCREF(result);
+	return result;
+}
+
+static int
+PyPlc_set_pin_cs(PyPlcObject *self, PyObject *val, void *closure)
+{
+    int gpio;
+
+    if (val == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+            "Attribute error");
+        return -1;
+    }
+    if (PyLong_Check(val)) {
+        gpio = PyLong_AS_LONG(val);
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+            "The rst attribute must be an integer");
+        return -2;
+    }
+
+    setup_gpio(gpio, OUTPUT, 0);
+    output_gpio(gpio, 1);
+    self->cs = gpio;
+    return 0;
+}
+
+static PyObject *
+PyPlc_get_pin_irq(PyPlcObject *self, void *closure)
+{
+	PyObject *result = Py_BuildValue("i", self->irq);
+	Py_INCREF(result);
+	return result;
+}
+
+static int
+PyPlc_set_pin_irq(PyPlcObject *self, PyObject *val, void *closure)
+{
+    int gpio;
+
+    if (val == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+            "Attribute error");
+        return -1;
+    }
+    if (PyLong_Check(val)) {
+        gpio = PyLong_AS_LONG(val);
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+            "The rst attribute must be an integer");
+        return -2;
+    }
+
+    setup_gpio(gpio, OUTPUT, 0);
+    self->irq = gpio;
+    return 0;
+}
+
+extern struct spi_ioc_transfer xfer;
+static PyObject *
+PyPlc_get_speed(PyPlcObject *self, void *closure)
+{
+	PyObject *result = Py_BuildValue("i", xfer.speed_hz);
+	Py_INCREF(result);
+	return result;
+}
+
+static int
+PyPlc_set_speed(PyPlcObject *self, PyObject *val, void *closure)
+{
+    int speed;
+
+    if (val == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+            "Attribute error");
+        return -1;
+    }
+    if (PyLong_Check(val)) {
+        speed = PyLong_AS_LONG(val);
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+            "The speed attribute must be an integer");
+        return -2;
+    }
+
+    xfer.speed_hz = speed;
+    return 0;
+}
+
 static PyGetSetDef PyPlc_getset[] = {
+    {"cs", (getter)PyPlc_get_pin_cs, (setter)PyPlc_set_pin_cs,
+			"CS pin number\n"},
 	{"ldo", (getter)PyPlc_get_pin_ldo, (setter)PyPlc_set_pin_ldo,
 			"LDO pin number\n"},
     {"rst", (getter)PyPlc_get_pin_rst, (setter)PyPlc_set_pin_rst,
 			"RST pin number\n"},
+    {"irq", (getter)PyPlc_get_pin_irq, (setter)PyPlc_set_pin_irq,
+			"IRQ pin number\n"},
+    {"speed", (getter)PyPlc_get_speed, (setter)PyPlc_set_speed,
+			"SPI speed\n"},
 	{NULL},
 };
 

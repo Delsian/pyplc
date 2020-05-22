@@ -174,7 +174,7 @@ int input_gpio(int gpio)
     return 0;
 }
 
-void cleanup(void)
+void gpio_cleanup(void)
 {
     unsigned int gpio;
     int unexport_fd;

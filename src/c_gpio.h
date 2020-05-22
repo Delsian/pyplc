@@ -25,7 +25,7 @@ void setup_gpio(int gpio, int direction, int pud);
 int gpio_function(int gpio);
 void output_gpio(int gpio, int value);
 int input_gpio(int gpio);
-void cleanup(void);
+void gpio_cleanup(void);
 
 #define SETUP_OK           0
 #define SETUP_DEVMEM_FAIL  1
