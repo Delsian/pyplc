@@ -1,0 +1,11 @@
+Change Log
+==========
+
+0.0.2
+------
+- Adding Python module functionality
+
+0.0.1
+------
+- First version. 
+
