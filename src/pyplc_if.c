@@ -21,6 +21,11 @@ SOFTWARE.
 */
 
 #include <Python.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
 #include "pyplc.h"
 
 #pragma pack(push,1)
@@ -107,6 +112,14 @@ typedef struct __attribute__((__packed__)) {
 #define INIT_PKT_DATA_SIZE (8)
 
 static pl360_tx_config_t txconf;
+static pthread_t irq_thread;
+static pthread_t h_thread;
+pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t handle_cond = PTHREAD_COND_INITIALIZER; 
+static int epfd_thread = -1;
+static int irq_fd;
+static int thread_running = 0;
+static status_t status;
 
 void pl360_tx(PyPlcObject *self, uint8_t* buf, int len) {
     assert(len<=PYPLC_MAX_BLOCK_SIZE);
@@ -116,12 +129,74 @@ void pl360_tx(PyPlcObject *self, uint8_t* buf, int len) {
     pkt->len = len;
     pkt->addr = ATPL360_TX_DATA_ID;
 
-    pl360_datapkt(self, PLC_CMD_WRITE, pkt);
+    //pl360_datapkt(self, PLC_CMD_WRITE, pkt);
+    printf("tx signal\n");
+    pthread_cond_signal(&handle_cond);
     free(pkt);
 }
 
-static uint32_t access_type(uint16_t param_id)
-{
+typedef struct {
+    uint16_t len;
+    uint16_t addr;
+    uint8_t buf[8];
+} plc_pkt8_t;
+
+static void pl360_update_status(PyPlcObject *self) {
+	plc_pkt8_t pkt = {
+		.addr = ATPL360_STATUS_INFO_ID,
+		.len = INIT_PKT_DATA_SIZE,
+	};
+	pl360_datapkt(self, PLC_CMD_READ, (plc_pkt_t*)&pkt);
+	memcpy(&status, pkt.buf, sizeof(status));
+}
+
+void *handle_thread(void *threadarg) {
+    thread_running = 1;
+    pthread_mutex_lock(&handle_lock);
+    while (thread_running) {
+
+	    pthread_cond_wait(&handle_cond, &handle_lock);
+        printf("Call cb\n");
+    }
+    pthread_mutex_unlock(&handle_lock);
+    thread_running = 0;
+    pthread_exit(NULL);
+}
+
+void *poll_thread(void *threadarg) {
+    struct epoll_event events;
+    int n;
+    char buf;
+
+    thread_running = 1;
+    while (thread_running) {
+        n = epoll_wait(epfd_thread, &events, 1, -1);
+        if (n > 0) {
+            lseek(events.data.fd, 0, SEEK_SET);
+            if (read(events.data.fd, &buf, 1) != 1) {
+                thread_running = 0;
+                printf("IRQ error 1\n");
+                pthread_exit(NULL);
+            }
+            printf("rx signal\n");
+            pthread_cond_signal(&handle_cond);
+        } else if (n == -1) {
+            /*  If a signal is received while we are waiting,
+                epoll_wait will return with an EINTR error.
+                Just try again in that case.  */
+            if (errno == EINTR) {
+                continue;
+            }
+            thread_running = 0;
+            printf("IRQ error 2\n");
+            pthread_exit(NULL);
+        }
+    }
+    thread_running = 0;
+    pthread_exit(NULL);
+}
+
+static uint32_t access_type(uint16_t param_id) {
 	uint32_t address = 0;
 
 	if (param_id & ATPL360_REG_ADC_MASK) {
@@ -152,7 +227,29 @@ static void pl360_set_config(plc_pkt_t* pkt, uint16_t param_id, uint16_t value) 
 	pkt->len = 8;
 }
 
-void pl360_init(PyPlcObject *self) {
+static int open_gpio(int gpio) {
+    int fd;
+    char filename[29];
+
+    snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio%d/value", gpio);
+    if ((fd = open(filename, O_RDONLY | O_NONBLOCK)) < 0)
+        return -1;
+    return fd;
+}
+static void remove_epoll(void) {
+    struct epoll_event ev;
+    // delete epoll of fd
+    ev.events = EPOLLIN | EPOLLET | EPOLLPRI;
+    ev.data.fd = irq_fd;
+    epoll_ctl(epfd_thread, EPOLL_CTL_DEL, irq_fd, &ev);
+    if (irq_fd != -1)
+        close(irq_fd);
+}
+
+int pl360_init(PyPlcObject *self) {
+    struct epoll_event ev;
+    long t = 0;
+
 	plc_pkt_t* pkt = malloc(INIT_PKT_DATA_SIZE+sizeof(plc_pkt_t));
 	assert(pkt);
 	/* Read Time Ref to get SPI status and boot if necessary */
@@ -187,8 +284,28 @@ void pl360_init(PyPlcObject *self) {
 	txconf.mod_type =  MOD_TYPE_BPSK; // uc_mod_type
 	txconf.mod_scheme =  MOD_SCHEME_DIFFERENTIAL; // uc_mod_scheme
 	txconf.uc_delimiter_type =  DT_SOF_NO_RESP; // uc_delimiter_type
+    Py_END_ALLOW_THREADS
 
     // Configure interrupt
-
-    Py_END_ALLOW_THREADS
+    if ((irq_fd = open_gpio(self->irq)) == -1) {
+        return -1;
+    }
+    if ((epfd_thread == -1) && ((epfd_thread = epoll_create(1)) == -1))
+        return -2;
+    // add to epoll fd
+    ev.events = EPOLLIN | EPOLLET | EPOLLPRI;
+    ev.data.fd = irq_fd;
+    if (epoll_ctl(epfd_thread, EPOLL_CTL_ADD, irq_fd, &ev) == -1) {
+        remove_epoll();
+        return -3;
+    }
+    if (pthread_create(&irq_thread, NULL, poll_thread, (void *)t) != 0) {
+        remove_epoll();
+        return -4;
+    }
+    if (pthread_create(&h_thread, NULL, handle_thread, (void *)t) != 0) {
+        remove_epoll();
+        return -5;
+    }
+    return 0;
 }

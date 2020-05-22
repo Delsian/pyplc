@@ -29,6 +29,7 @@ SOFTWARE.
 #include <linux/ioctl.h>
 #include "pyplc.h"
 
+
 PyDoc_STRVAR(PyPlcModuleDoc,
 	"This module defines an object type that allows ATPL360 transactions.\n"
 	"\n"
@@ -138,14 +139,48 @@ PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
     setup_gpio(self->ldo, OUTPUT, 0);
     setup_gpio(self->rst, OUTPUT, 0);
     setup_gpio(self->irq, INPUT, 0);
-    pl360_init(self);
+    int err = pl360_init(self);
+	if (err < 0) {
+		printf("err %d\n", err);
+		PyErr_SetString(PyExc_RuntimeError, "PLC init failed");
+		return NULL;
+	}
+
+	Py_INCREF(Py_None);
+	return Py_None;
+}
+
+PyDoc_STRVAR(PyPlcRxCbDoc,
+	"setrxcb(gpio, cb=None) -> None\n\n"
+	"Set callback function to call on packet Rx\n"
+	"gpio - IRQ pin number\n");
+
+static PyObject *
+PyPlc_setrxcb(PyPlcObject *self, PyObject *args, PyObject *kwargs)
+{
+	int gpio;
+	PyObject *cb_func;
+	char *kwlist[] = {"gpio", "callback", NULL};
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|i", kwlist, &gpio, &cb_func))
+		return NULL;
+
+	if (cb_func != NULL && !PyCallable_Check(cb_func))
+	{
+		PyErr_SetString(PyExc_TypeError, "Parameter must be callable");
+		return NULL;
+	}
+
+	self->rxcb = cb_func;
+	setup_gpio(gpio, INPUT, 0);
+	self->irq = gpio;
 
 	Py_INCREF(Py_None);
 	return Py_None;
 }
 
 PyDoc_STRVAR(PyPlcTxDoc,
-	"tx([object]) -> None\n\n"
+	"tx(bytearray) -> None\n\n"
 	"Write bytes to PLC device.\n");
 
 static PyObject *
@@ -364,11 +399,10 @@ PyPlc_set_pin_irq(PyPlcObject *self, PyObject *val, void *closure)
         gpio = PyLong_AS_LONG(val);
     } else {
         PyErr_SetString(PyExc_TypeError,
-            "The rst attribute must be an integer");
+            "The irq attribute must be an integer");
         return -2;
     }
 
-    setup_gpio(gpio, OUTPUT, 0);
     self->irq = gpio;
     return 0;
 }
@@ -411,7 +445,7 @@ static PyGetSetDef PyPlc_getset[] = {
 			"LDO pin number\n"},
     {"rst", (getter)PyPlc_get_pin_rst, (setter)PyPlc_set_pin_rst,
 			"RST pin number\n"},
-    {"irq", (getter)PyPlc_get_pin_irq, (setter)PyPlc_set_pin_irq,
+	{"irq", (getter)PyPlc_get_pin_irq, (setter)PyPlc_set_pin_irq,
 			"IRQ pin number\n"},
     {"speed", (getter)PyPlc_get_speed, (setter)PyPlc_set_speed,
 			"SPI speed\n"},
@@ -425,6 +459,8 @@ static PyMethodDef PyPlcMethods[] = {
 		PyPlcCloseDoc},
     {"tx",  (PyCFunction)PyPlc_tx, METH_VARARGS, 
         PyPlcTxDoc},
+	{"setrxcb",  (PyCFunction)PyPlc_setrxcb, METH_VARARGS, 
+        PyPlcRxCbDoc},
 	{"__enter__", (PyCFunction)PyPlc_enter, METH_VARARGS,
 		NULL},
 	{"__exit__", (PyCFunction)PyPlc_exit, METH_VARARGS,

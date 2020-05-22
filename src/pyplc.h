@@ -219,10 +219,11 @@ typedef struct {
     int ldo; /* LDO pin number */
     int rst; /* RST pin number */
 	int irq; /* IRQ pin number */
+	PyObject *rxcb; /* Callback to RX function */
 	uint16_t events; /* events state from PL360 */
 } PyPlcObject;
 
 void pl360_reset(PyPlcObject *self);
 void pl360_tx(PyPlcObject *self, uint8_t* buf, int len);
 void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt);
-void pl360_init(PyPlcObject *self);
+int pl360_init(PyPlcObject *self);

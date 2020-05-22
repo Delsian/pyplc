@@ -1,6 +1,18 @@
 Change Log
 ==========
 
+0.0.5
+-----
+- IRQ signals
+
+0.0.4
+-----
+- PLC boot procedure
+
+0.0.3
+-----
+- SPI communication
+
 0.0.2
 ------
 - Adding Python module functionality
