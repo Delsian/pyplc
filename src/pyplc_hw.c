@@ -20,11 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include <Python.h>
 #include "pyplc.h"
-#include <unistd.h> 
-#include <sys/ioctl.h>
-#include <linux/ioctl.h>
 
 /* ! Reset pin of transceiver */
 #define PLC_RST_DELAY                (100)
@@ -51,6 +47,7 @@ SOFTWARE.
 static uint8_t plc_rx_buffer[PDC_PPLC_BUFFER_SIZE];
 /* PDC Transmission buffer */
 static uint8_t plc_tx_buffer[PDC_PPLC_BUFFER_SIZE];
+static int export_fd;
 
 #include "boot/boot.h"
 
@@ -63,11 +60,11 @@ struct spi_ioc_transfer xfer = {
 
 void pl360_reset(PyPlcObject *self) {
     Py_BEGIN_ALLOW_THREADS
-	output_gpio(self->ldo, 0);
+	gpio_out(GPIO_LDO, 0);
     usleep(100000);
-    output_gpio(self->rst, 0);
-    output_gpio(self->cs, 1);
-    output_gpio(self->ldo, 1);
+    gpio_out(GPIO_RST, 0);
+    gpio_out(GPIO_CS, 1);
+    gpio_out(GPIO_LDO, 1);
 
 	xfer.len = 1;
     xfer.rx_buf = (unsigned long)&plc_rx_buffer[0];
@@ -77,7 +74,7 @@ void pl360_reset(PyPlcObject *self) {
 	}
 
 	usleep(10000);
-    output_gpio(self->rst, 1);
+    gpio_out(GPIO_RST, 1);
     usleep(10000);
     Py_END_ALLOW_THREADS
 }
@@ -91,9 +88,9 @@ static void pl360_boot_pkt(PyPlcObject *self, uint16_t cmd, uint32_t addr, uint1
 	xfer.len = data_len + 6;
     xfer.rx_buf = (unsigned long)&plc_rx_buffer[0];
     xfer.tx_buf = (unsigned long)&plc_tx_buffer[0];
-    output_gpio(self->cs, 0);
+    gpio_out(GPIO_CS, 0);
 	int err = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
-    output_gpio(self->cs, 1);
+    gpio_out(GPIO_CS, 1);
 	if(err<0) {
 		PyErr_SetFromErrno(PyExc_IOError);
 	}
@@ -180,25 +177,21 @@ static void pl360_check_status(PyPlcObject *self, uint32_t st) {
 static void pktwr(plc_pkt_t* pkt) {
     uint16_t ptr = 0;
     // change word seq to bytes
-    Py_BEGIN_ALLOW_THREADS
     while( ptr < pkt->len) {
         plc_tx_buffer[ptr+4] = pkt->buf[ptr+1];
         plc_tx_buffer[ptr+5] = pkt->buf[ptr];
         ptr += 2;
     }
-    Py_END_ALLOW_THREADS
 }
 
 static void pktrd(plc_pkt_t* pkt) {
     uint16_t ptr = 0;
     // change word seq to bytes
-    Py_BEGIN_ALLOW_THREADS
     while( ptr < pkt->len) {
         pkt->buf[ptr+1] = plc_rx_buffer[ptr+4];
         pkt->buf[ptr] = plc_rx_buffer[ptr+5];
         ptr += 2;
     }
-    Py_END_ALLOW_THREADS
 }
 
 void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt)
@@ -224,9 +217,7 @@ void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt)
 	if (cmd == PLC_CMD_WRITE) {
 		pktwr(pkt);
 	} else {
-        Py_BEGIN_ALLOW_THREADS
 		memset(&plc_tx_buffer[PDC_SPI_HEADER_SIZE], 0, pkt->len);
-        Py_END_ALLOW_THREADS
 	}
 
 	xfer.len  = pkt->len + PDC_SPI_HEADER_SIZE;
@@ -234,17 +225,15 @@ void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt)
 		xfer.len ++;
 	}
 
-    Py_BEGIN_ALLOW_THREADS
     xfer.rx_buf = (unsigned long)&plc_rx_buffer[0];
     xfer.tx_buf = (unsigned long)&plc_tx_buffer[0];
-    output_gpio(self->cs, 0);
+    gpio_out(GPIO_CS, 0);
 	err = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
-    output_gpio(self->cs, 1);
+    gpio_out(GPIO_CS, 1);
 	if(err < 0) {
         printf("Err %d", err);
 		PyErr_SetFromErrno(PyExc_IOError);
 	}
-    Py_END_ALLOW_THREADS
 
 	if (cmd == PLC_CMD_READ) {
 		pktrd(pkt);
@@ -253,4 +242,105 @@ void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt)
 	uint32_t status = (plc_rx_buffer[2] << 24) + (plc_rx_buffer[3] << 16) +
 		(plc_rx_buffer[0] << 8) +  plc_rx_buffer[1];
 	pl360_check_status(self, status);
+}
+
+void gpios_cleanup(PyPlcObject *self) {
+	int i, len;
+    int unexport_fd;
+	char str_gpio[3];
+
+	close(export_fd);
+
+    if ((unexport_fd = open("/sys/class/gpio/unexport", O_WRONLY)) < 0) {
+		printf("Unexport open fail\n");
+        return;
+	}
+	for(i=0; i<GPIO_INDEX_MAX; i++) {
+		if(self->pin[i].dir_fd >= 0) {
+            close(self->pin[i].dir_fd);
+
+            if (self->pin[i].val_fd >= 0)
+                close(self->pin[i].val_fd);
+
+            len = snprintf(str_gpio, sizeof(str_gpio), "%d", self->pin[i].num);
+            lseek(unexport_fd, 0, SEEK_SET);
+            if (write(unexport_fd, str_gpio, len) != len)
+            {
+                close(unexport_fd);
+				printf("Unexport fail for %d\n", self->pin[i].num);
+                return;
+            }
+		}
+	}
+
+	close(unexport_fd);
+}
+
+int gpios_init(PyPlcObject *self) {
+	int i;
+
+	if ((export_fd = open("/sys/class/gpio/export", O_WRONLY)) < 0)
+       return -1;
+
+	for(i=0; i<GPIO_INDEX_MAX; i++) {
+		self->pin[i].dir_fd = -1;
+		self->pin[i].num = -1;
+	}
+
+    return 0;
+}
+
+int gpio_setup(gpio_t* gpio, gpio_dir_e dir)
+{
+	char filename[33];
+	char str_gpio[3];
+	int len;
+
+    if (gpio->dir_fd < 0) {
+		snprintf(filename, sizeof(filename),
+             "/sys/class/gpio/gpio%d/value", gpio->num);
+		if (0 != access(filename, F_OK)) {
+			len = snprintf(str_gpio, sizeof(str_gpio), "%d", gpio->num);
+			lseek(export_fd, 0, SEEK_SET);
+			if (write(export_fd, str_gpio, len) != len)
+				return -1;
+			// arbitary delay to allow udev time to set user permissions
+			usleep(50000); // 50ms
+		}
+
+		snprintf(filename, sizeof(filename),
+             "/sys/class/gpio/gpio%d/direction", gpio->num);
+    	if ((gpio->dir_fd = open(filename, O_RDWR | O_SYNC)) < 0)
+        	return -2;
+
+        snprintf(filename, sizeof(filename),
+            "/sys/class/gpio/gpio%d/value", gpio->num);
+    	if ((gpio->val_fd = open(filename, O_RDWR | O_SYNC)) < 0)
+        	return -3;
+	} else {
+		// ToDo unexport
+		printf("Warn: already inited %d\n", gpio->num);
+	}
+
+    if (gpio->dir_fd >= 0)
+    {
+        lseek(gpio->dir_fd, 0, SEEK_SET);
+        if (dir == GPIO_DIR_INPUT)
+            write(gpio->dir_fd, "in", 2);
+        else
+            write(gpio->dir_fd, "out", 3);
+    }
+}
+
+void gpio_out(gpio_t* gpio, int value)
+{
+    if (gpio->dir_fd < 0) {
+        gpio_setup(gpio, GPIO_DIR_OUTPUT);
+	}
+
+    if (gpio->val_fd >= 0)
+    {
+        lseek(gpio->val_fd, 0, SEEK_SET);
+        write(gpio->val_fd, value ? "1" : "0", 1);
+    }
 }

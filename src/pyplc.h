@@ -22,8 +22,13 @@ SOFTWARE.
 
 #pragma once
 
-#include "c_gpio.h"
+#include <Python.h>
+#include <linux/types.h>
 #include <linux/spi/spidev.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/ioctl.h>
 
 #define _VERSION_ "3.4"
 #define PYPLC_MAX_BLOCK_SIZE 160
@@ -207,7 +212,23 @@ typedef struct {
     uint8_t buf[0];
 } plc_pkt_t;
 
+typedef struct {
+	int num;
+	int dir_fd;
+	int val_fd;
+} gpio_t;
+typedef enum {
+	GPIO_DIR_INPUT,
+	GPIO_DIR_OUTPUT
+} gpio_dir_e;
+
 typedef void (*pl360_rx_cb)(plc_pkt_t *pkt);
+
+#define	GPIO_INDEX_CS 0 /* CS pin */
+#define	GPIO_INDEX_LDO 1 /* LDO pin */
+#define	GPIO_INDEX_RST 2 /* RST pin */
+#define	GPIO_INDEX_IRQ 3 /* IRQ pin */
+#define	GPIO_INDEX_MAX 4
 
 typedef struct {
 	PyObject_HEAD
@@ -215,15 +236,25 @@ typedef struct {
 	uint8_t mode;	/* current SPI mode */
 	uint8_t bits_per_word;	/* current SPI bits per word setting */
 	uint32_t max_speed_hz;	/* current SPI max speed setting in Hz */
-	int cs; /* CS pin number */
-    int ldo; /* LDO pin number */
-    int rst; /* RST pin number */
-	int irq; /* IRQ pin number */
+	gpio_t pin[GPIO_INDEX_MAX];
 	PyObject *rxcb; /* Callback to RX function */
 	uint16_t events; /* events state from PL360 */
+	int thread_running;
 } PyPlcObject;
+
+#define GET_GPIO(n) (&(self->pin[n]))
+#define GPIO_LDO (&(self->pin[GPIO_INDEX_LDO]))
+#define GPIO_RST (&(self->pin[GPIO_INDEX_RST]))
+#define GPIO_CS (&(self->pin[GPIO_INDEX_CS]))
+#define GPIO_IRQ (&(self->pin[GPIO_INDEX_IRQ]))
 
 void pl360_reset(PyPlcObject *self);
 void pl360_tx(PyPlcObject *self, uint8_t* buf, int len);
 void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt);
 int pl360_init(PyPlcObject *self);
+void pl360_stop(PyPlcObject *self);
+
+int gpios_init(PyPlcObject *self);
+int gpio_setup(gpio_t* gpio, gpio_dir_e dir);
+void gpio_out(gpio_t* gpio, int value);
+void gpios_cleanup(PyPlcObject *self);

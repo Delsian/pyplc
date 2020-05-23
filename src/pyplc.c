@@ -21,12 +21,8 @@ SOFTWARE.
 */
 
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 
 #include <fcntl.h>
-#include <linux/types.h>
-#include <sys/ioctl.h>
-#include <linux/ioctl.h>
 #include "pyplc.h"
 
 
@@ -130,15 +126,19 @@ PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
 	self->max_speed_hz = tmp32;
 
     // GPIOs
-    if(self->ldo==0 || self->rst==0 || self->irq==0) {
-        PyErr_SetString(PyExc_TypeError,
-            "Aux pins not configured");
-        return NULL;
-    } 
+	for(int i=0; i<GPIO_INDEX_MAX; i++) {
+		if(self->pin[i].num < 0) {
+			PyErr_SetString(PyExc_TypeError,
+            	"Aux pins not configured");
+        	return NULL;
+		}
+	}
 
-    setup_gpio(self->ldo, OUTPUT, 0);
-    setup_gpio(self->rst, OUTPUT, 0);
-    setup_gpio(self->irq, INPUT, 0);
+	gpio_setup(GPIO_LDO, GPIO_DIR_OUTPUT);
+	gpio_setup(GPIO_CS, GPIO_DIR_OUTPUT);
+	gpio_setup(GPIO_RST, GPIO_DIR_OUTPUT);
+	gpio_setup(GPIO_IRQ, GPIO_DIR_INPUT);
+
     int err = pl360_init(self);
 	if (err < 0) {
 		printf("err %d\n", err);
@@ -172,8 +172,8 @@ PyPlc_setrxcb(PyPlcObject *self, PyObject *args, PyObject *kwargs)
 	}
 
 	self->rxcb = cb_func;
-	setup_gpio(gpio, INPUT, 0);
-	self->irq = gpio;
+	self->pin[GPIO_INDEX_IRQ].num = gpio;
+	gpio_setup(GPIO_IRQ, GPIO_DIR_INPUT);
 
 	Py_INCREF(Py_None);
 	return Py_None;
@@ -239,7 +239,7 @@ PyPlc_init(PyPlcObject *self, PyObject *args, PyObject *kwds)
 			kwlist, &bus, &client))
 		return -1;
 
-    gpio_setup();
+    gpios_init(self);
 
 	if (bus >= 0) {
 		PyPlc_open(self, args, kwds);
@@ -278,21 +278,22 @@ PyObject *PyPlc_exit(PyPlcObject *self, PyObject *args)
         return 0;
     }
 
+	pl360_stop(self);
     PyPlc_close(self);
-    gpio_cleanup();
+    gpios_cleanup(self);
     Py_RETURN_FALSE;
 }
 
 static PyObject *
-PyPlc_get_pin_ldo(PyPlcObject *self, void *closure)
+PyPlc_get_pin(PyPlcObject *self, int idx, void *closure)
 {
-	PyObject *result = Py_BuildValue("i", self->ldo);
+	PyObject *result = Py_BuildValue("i", self->pin[idx].num);
 	Py_INCREF(result);
 	return result;
 }
 
 static int
-PyPlc_set_pin_ldo(PyPlcObject *self, PyObject *val, void *closure)
+PyPlc_set_pin(PyPlcObject *self, int idx, PyObject *val, void *closure)
 {
    int gpio;
 
@@ -305,106 +306,60 @@ PyPlc_set_pin_ldo(PyPlcObject *self, PyObject *val, void *closure)
         gpio = PyLong_AS_LONG(val);
     } else {
         PyErr_SetString(PyExc_TypeError,
-            "The rst attribute must be an integer");
+            "The pin number attribute must be an integer");
         return -2;
     }
 
-    setup_gpio(gpio, OUTPUT, 0);
-    self->ldo = gpio;
+    self->pin[idx].num = gpio;
     return 0;
+}
+
+static PyObject *
+PyPlc_get_pin_ldo(PyPlcObject *self, void *closure)
+{
+	return PyPlc_get_pin(self, GPIO_INDEX_LDO, closure);
+}
+
+static int
+PyPlc_set_pin_ldo(PyPlcObject *self, PyObject *val, void *closure)
+{
+    return PyPlc_set_pin(self, GPIO_INDEX_LDO, val, closure);
 }
 
 static PyObject *
 PyPlc_get_pin_rst(PyPlcObject *self, void *closure)
 {
-	PyObject *result = Py_BuildValue("i", self->rst);
-	Py_INCREF(result);
-	return result;
+	return PyPlc_get_pin(self, GPIO_INDEX_RST, closure);
 }
 
 static int
 PyPlc_set_pin_rst(PyPlcObject *self, PyObject *val, void *closure)
 {
-    int gpio;
-
-    if (val == NULL) {
-        PyErr_SetString(PyExc_TypeError,
-            "Attribute error");
-        return -1;
-    }
-    if (PyLong_Check(val)) {
-        gpio = PyLong_AS_LONG(val);
-    } else {
-        PyErr_SetString(PyExc_TypeError,
-            "The rst attribute must be an integer");
-        return -2;
-    }
-
-    setup_gpio(gpio, OUTPUT, 0);
-    self->rst = gpio;
-    return 0;
+	return PyPlc_set_pin(self, GPIO_INDEX_RST, val, closure);
 }
 
 static PyObject *
 PyPlc_get_pin_cs(PyPlcObject *self, void *closure)
 {
-	PyObject *result = Py_BuildValue("i", self->cs);
-	Py_INCREF(result);
-	return result;
+	return PyPlc_get_pin(self, GPIO_INDEX_CS, closure);
 }
 
 static int
 PyPlc_set_pin_cs(PyPlcObject *self, PyObject *val, void *closure)
 {
-    int gpio;
-
-    if (val == NULL) {
-        PyErr_SetString(PyExc_TypeError,
-            "Attribute error");
-        return -1;
-    }
-    if (PyLong_Check(val)) {
-        gpio = PyLong_AS_LONG(val);
-    } else {
-        PyErr_SetString(PyExc_TypeError,
-            "The rst attribute must be an integer");
-        return -2;
-    }
-
-    setup_gpio(gpio, OUTPUT, 0);
-    output_gpio(gpio, 1);
-    self->cs = gpio;
-    return 0;
+    return PyPlc_set_pin(self, GPIO_INDEX_CS, val, closure);
 }
 
 static PyObject *
 PyPlc_get_pin_irq(PyPlcObject *self, void *closure)
 {
-	PyObject *result = Py_BuildValue("i", self->irq);
-	Py_INCREF(result);
-	return result;
+	return PyPlc_get_pin(self, GPIO_INDEX_IRQ, closure);
 }
 
 static int
 PyPlc_set_pin_irq(PyPlcObject *self, PyObject *val, void *closure)
 {
-    int gpio;
-
-    if (val == NULL) {
-        PyErr_SetString(PyExc_TypeError,
-            "Attribute error");
-        return -1;
-    }
-    if (PyLong_Check(val)) {
-        gpio = PyLong_AS_LONG(val);
-    } else {
-        PyErr_SetString(PyExc_TypeError,
-            "The irq attribute must be an integer");
-        return -2;
-    }
-
-    self->irq = gpio;
-    return 0;
+    return PyPlc_set_pin(self, GPIO_INDEX_IRQ, val, closure);
 }
 
 extern struct spi_ioc_transfer xfer;

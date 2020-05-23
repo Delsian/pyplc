@@ -20,12 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include <Python.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
 #include "pyplc.h"
 
 #pragma pack(push,1)
@@ -114,25 +112,29 @@ typedef struct __attribute__((__packed__)) {
 static pl360_tx_config_t txconf;
 static pthread_t irq_thread;
 static pthread_t h_thread;
+static pthread_t t_thread;
 pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t handle_cond = PTHREAD_COND_INITIALIZER; 
+pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t tx_cond = PTHREAD_COND_INITIALIZER; 
+pthread_mutex_t plc_lock = PTHREAD_MUTEX_INITIALIZER;
 static int epfd_thread = -1;
-static int irq_fd;
-static int thread_running = 0;
 static status_t status;
+static plc_pkt_t* txpkt; // Packet queued to transmit
 
 void pl360_tx(PyPlcObject *self, uint8_t* buf, int len) {
     assert(len<=PYPLC_MAX_BLOCK_SIZE);
+    while(txpkt) {
+		pthread_cond_signal(&tx_cond);
+	    usleep(10000);
+	}
     plc_pkt_t* pkt = (plc_pkt_t*) malloc(sizeof(plc_pkt_t)+len);
 	assert(pkt);
     memcpy(pkt->buf, buf, len);
     pkt->len = len;
     pkt->addr = ATPL360_TX_DATA_ID;
-
-    //pl360_datapkt(self, PLC_CMD_WRITE, pkt);
-    printf("tx signal\n");
-    pthread_cond_signal(&handle_cond);
-    free(pkt);
+    txpkt = pkt;
+    pthread_cond_signal(&tx_cond);
 }
 
 typedef struct {
@@ -147,34 +149,125 @@ static void pl360_update_status(PyPlcObject *self) {
 		.len = INIT_PKT_DATA_SIZE,
 	};
 	pl360_datapkt(self, PLC_CMD_READ, (plc_pkt_t*)&pkt);
+    printf("size stat %d %p", sizeof(status), &status);
 	memcpy(&status, pkt.buf, sizeof(status));
 }
 
-void *handle_thread(void *threadarg) {
-    thread_running = 1;
-    pthread_mutex_lock(&handle_lock);
-    while (thread_running) {
+void *tx_thread(void *threadarg) {
+    PyPlcObject *self = (PyPlcObject *)threadarg;
+    self->thread_running = 1;
+    pthread_mutex_lock(&tx_lock);
+    while (self->thread_running) {
+        printf("Wait tx\n");
+	    pthread_cond_wait(&tx_cond, &tx_lock);
+        printf("Call tx\n");
+        while(self->events) {
+		    pthread_cond_signal(&handle_cond);
+		    usleep(1000);
+	    }
+        if (txpkt) {
+            txconf.data_len = txpkt->len;
+            plc_pkt_t* parampkt = (plc_pkt_t*)malloc(sizeof(pl360_tx_config_t) + sizeof(plc_pkt_t));
+            assert(parampkt);
+            parampkt->addr = ATPL360_TX_PARAM_ID;
+            parampkt->len = sizeof(pl360_tx_config_t);
+            memcpy(parampkt->buf,&txconf,sizeof(pl360_tx_config_t));
+            // Skip until RX complete
+            if(pthread_mutex_trylock(&plc_lock) == 0) {
+                pl360_datapkt(self, PLC_CMD_WRITE, parampkt);
+                pl360_datapkt(self, PLC_CMD_WRITE, txpkt);
+                free(txpkt);
+                txpkt = NULL;
+            }
+            pthread_mutex_unlock(&plc_lock);
+            free(parampkt);
+        }
+    }
+    pthread_mutex_unlock(&tx_lock);
+    self->thread_running = 0;
+    pthread_exit(NULL);
+}
 
+void *handle_thread(void *threadarg) {
+    PyPlcObject *self = (PyPlcObject *)threadarg;
+    self->thread_running = 1;
+    pthread_mutex_lock(&handle_lock);
+    while (self->thread_running) {
+        printf("Wait cb\n");
 	    pthread_cond_wait(&handle_cond, &handle_lock);
-        printf("Call cb\n");
+        pthread_mutex_lock(&plc_lock);
+        do {
+            printf("Call cb2\n");
+		    pl360_update_status(self);
+            printf("Ev %x\n", self->events);
+            if (self->events & ATPL360_TX_CFM_FLAG_MASK) {
+                // Handle TX confirm
+                plc_pkt_t* cfmpkt = malloc(sizeof(plc_pkt_t) + ATPL360_CMF_PKT_SIZE);
+                cfmpkt->addr = ATPL360_TX_CFM_ID;
+                cfmpkt->len = ATPL360_CMF_PKT_SIZE;
+                pl360_datapkt(self, PLC_CMD_READ, cfmpkt);
+                free(cfmpkt);
+            } else if (self->events & ATPL360_REG_RSP_MASK) {
+                // Handle RegResp
+                uint16_t evt_len = ATPL360_GET_EV_REG_LEN_INFO(status.evt);
+                if ((evt_len == 0) || (evt_len > MAX_PLC_PKT_LEN)) {
+                    evt_len = 1;
+                }
+                plc_pkt_t* rsppkt = (plc_pkt_t*)malloc(evt_len + sizeof(plc_pkt_t));
+                rsppkt->addr = ATPL360_REG_INFO_ID;
+                rsppkt->len = evt_len;
+                pl360_datapkt(self, PLC_CMD_READ, rsppkt);
+                free(rsppkt);
+            } else if (self->events & ATPL360_RX_QPAR_IND_FLAG_MASK) {
+                // Handle RX qpar
+                plc_pkt_t* qpkt = (plc_pkt_t*)malloc(sizeof(rx_msg_t) - 4 + sizeof(plc_pkt_t));
+                qpkt->addr = ATPL360_RX_PARAM_ID;
+                qpkt->len = sizeof(rx_msg_t) - 4;
+                pl360_datapkt(self, PLC_CMD_READ, qpkt);
+                free(qpkt);
+            } else if (self->events & ATPL360_RX_DATA_IND_FLAG_MASK) {
+                // Handle RX data, data length (15 bits) 
+                uint16_t l = status.evt & 0x7F;
+                plc_pkt_t* rxpkt = (plc_pkt_t*)malloc(l + sizeof(plc_pkt_t));
+                assert(rxpkt);
+                rxpkt->addr = ATPL360_RX_DATA_ID;
+                rxpkt->len = l;
+                pl360_datapkt(self, PLC_CMD_READ, rxpkt);
+                if (self->rxcb) {
+                    // Move to worker
+                    //(*data->rx_cb)(rxpkt);
+
+                    // !!!! FREEE !!!
+                } else {
+                    free(rxpkt);
+                }
+            }
+        } while (self->events);
+        pthread_mutex_unlock(&plc_lock);
+        if (txpkt) {
+            // After unsuccessful lock
+            pthread_cond_signal(&tx_cond);
+        }
     }
     pthread_mutex_unlock(&handle_lock);
-    thread_running = 0;
+    self->thread_running = 0;
     pthread_exit(NULL);
 }
 
 void *poll_thread(void *threadarg) {
+    PyPlcObject *self = (PyPlcObject *)threadarg;
     struct epoll_event events;
     int n;
     char buf;
-
-    thread_running = 1;
-    while (thread_running) {
+    self->thread_running = 1;
+    while (self->thread_running) {
+        printf("epoll1\n");
         n = epoll_wait(epfd_thread, &events, 1, -1);
+        printf("epoll2 %d\n", n);
         if (n > 0) {
             lseek(events.data.fd, 0, SEEK_SET);
             if (read(events.data.fd, &buf, 1) != 1) {
-                thread_running = 0;
+                self->thread_running = 0;
                 printf("IRQ error 1\n");
                 pthread_exit(NULL);
             }
@@ -187,12 +280,12 @@ void *poll_thread(void *threadarg) {
             if (errno == EINTR) {
                 continue;
             }
-            thread_running = 0;
+            self->thread_running = 0;
             printf("IRQ error 2\n");
             pthread_exit(NULL);
         }
     }
-    thread_running = 0;
+    self->thread_running = 0;
     pthread_exit(NULL);
 }
 
@@ -227,28 +320,22 @@ static void pl360_set_config(plc_pkt_t* pkt, uint16_t param_id, uint16_t value) 
 	pkt->len = 8;
 }
 
-static int open_gpio(int gpio) {
-    int fd;
-    char filename[29];
-
-    snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio%d/value", gpio);
-    if ((fd = open(filename, O_RDONLY | O_NONBLOCK)) < 0)
-        return -1;
-    return fd;
-}
-static void remove_epoll(void) {
+static void remove_epoll(PyPlcObject *self) {
     struct epoll_event ev;
     // delete epoll of fd
     ev.events = EPOLLIN | EPOLLET | EPOLLPRI;
-    ev.data.fd = irq_fd;
-    epoll_ctl(epfd_thread, EPOLL_CTL_DEL, irq_fd, &ev);
-    if (irq_fd != -1)
-        close(irq_fd);
+    ev.data.fd = self->pin[GPIO_INDEX_IRQ].val_fd;
+    epoll_ctl(epfd_thread, EPOLL_CTL_DEL, 
+        self->pin[GPIO_INDEX_IRQ].val_fd, &ev);
+}
+
+void pl360_stop(PyPlcObject *self) {
+    self->thread_running = 0;
+    remove_epoll(self);
 }
 
 int pl360_init(PyPlcObject *self) {
     struct epoll_event ev;
-    long t = 0;
 
 	plc_pkt_t* pkt = malloc(INIT_PKT_DATA_SIZE+sizeof(plc_pkt_t));
 	assert(pkt);
@@ -286,26 +373,29 @@ int pl360_init(PyPlcObject *self) {
 	txconf.uc_delimiter_type =  DT_SOF_NO_RESP; // uc_delimiter_type
     Py_END_ALLOW_THREADS
 
-    // Configure interrupt
-    if ((irq_fd = open_gpio(self->irq)) == -1) {
-        return -1;
+    // TX/RX handlers
+    txpkt = NULL;
+    if (pthread_create(&h_thread, NULL, handle_thread, (void *)self) != 0) {
+        return -5;
     }
+    if (pthread_create(&t_thread, NULL, tx_thread, (void *)self) != 0) {
+        return -6;
+    }
+
+    // Configure interrupt
     if ((epfd_thread == -1) && ((epfd_thread = epoll_create(1)) == -1))
         return -2;
     // add to epoll fd
     ev.events = EPOLLIN | EPOLLET | EPOLLPRI;
-    ev.data.fd = irq_fd;
-    if (epoll_ctl(epfd_thread, EPOLL_CTL_ADD, irq_fd, &ev) == -1) {
-        remove_epoll();
+    ev.data.fd = self->pin[GPIO_INDEX_IRQ].val_fd;
+    if (epoll_ctl(epfd_thread, EPOLL_CTL_ADD,
+            self->pin[GPIO_INDEX_IRQ].val_fd, &ev) == -1) {
+        remove_epoll(self);
         return -3;
     }
-    if (pthread_create(&irq_thread, NULL, poll_thread, (void *)t) != 0) {
-        remove_epoll();
+    if (pthread_create(&irq_thread, NULL, poll_thread, (void *)self) != 0) {
+        remove_epoll(self);
         return -4;
-    }
-    if (pthread_create(&h_thread, NULL, handle_thread, (void *)t) != 0) {
-        remove_epoll();
-        return -5;
     }
     return 0;
 }
