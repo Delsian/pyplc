@@ -256,5 +256,6 @@ void pl360_stop(PyPlcObject *self);
 
 int gpios_init(PyPlcObject *self);
 int gpio_setup(gpio_t* gpio, gpio_dir_e dir);
+int gpio_set_edge(gpio_t* gpio, unsigned int edge);
 void gpio_out(gpio_t* gpio, int value);
 void gpios_cleanup(PyPlcObject *self);

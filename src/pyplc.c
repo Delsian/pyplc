@@ -56,6 +56,10 @@ PyDoc_STRVAR(PyPlcCloseDoc,
 static PyObject *
 PyPlc_close(PyPlcObject *self)
 {
+	printf("Close\n");
+
+	pl360_stop(self);
+
 	if ((self->fd != -1) && (close(self->fd) == -1)) {
 		PyErr_SetFromErrno(PyExc_IOError);
 		return NULL;
@@ -65,6 +69,8 @@ PyPlc_close(PyPlcObject *self)
 	self->mode = 0;
 	self->bits_per_word = 0;
 	self->max_speed_hz = 0;
+
+    gpios_cleanup(self);
 
 	Py_INCREF(Py_None);
 	return Py_None;
@@ -278,9 +284,6 @@ PyObject *PyPlc_exit(PyPlcObject *self, PyObject *args)
         return 0;
     }
 
-	pl360_stop(self);
-    PyPlc_close(self);
-    gpios_cleanup(self);
     Py_RETURN_FALSE;
 }
 

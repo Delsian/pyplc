@@ -344,3 +344,19 @@ void gpio_out(gpio_t* gpio, int value)
         write(gpio->val_fd, value ? "1" : "0", 1);
     }
 }
+
+int gpio_set_edge(gpio_t* gpio, unsigned int edge)
+{
+    int fd;
+    char filename[28];
+	const char *stredge[4] = {"none", "rising", "falling", "both"};
+
+    snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio%d/edge", gpio->num);
+
+    if ((fd = open(filename, O_WRONLY)) < 0)
+        return -1;
+
+    write(fd, stredge[edge], strlen(stredge[edge]) + 1);
+    close(fd);
+    return 0;
+}

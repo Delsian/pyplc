@@ -383,6 +383,7 @@ int pl360_init(PyPlcObject *self) {
     }
 
     // Configure interrupt
+    gpio_set_edge(GPIO_IRQ,2);
     if ((epfd_thread == -1) && ((epfd_thread = epoll_create(1)) == -1))
         return -2;
     // add to epoll fd
