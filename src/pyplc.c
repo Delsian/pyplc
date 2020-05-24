@@ -35,7 +35,6 @@ PyDoc_STRVAR(PyPlcModuleDoc,
 static PyObject *
 PyPlc_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
-    printf("New\n");
 	PyPlcObject *self;
 	if ((self = (PyPlcObject *)type->tp_alloc(type, 0)) == NULL)
 		return NULL;
@@ -56,8 +55,6 @@ PyDoc_STRVAR(PyPlcCloseDoc,
 static PyObject *
 PyPlc_close(PyPlcObject *self)
 {
-	printf("Close\n");
-
 	pl360_stop(self);
 
 	if ((self->fd != -1) && (close(self->fd) == -1)) {
@@ -90,20 +87,23 @@ static char *wrmsg_listmax = "Argument list size exceeds %d bytes.";
 static char *wrmsg_val = "Non-Int/Long value in arguments: %x.";
 
 PyDoc_STRVAR(PyPlcOpenDoc,
-	"open(bus, device)\n\n"
+	"open(bus, device, cs=0, ldo=0, rst=0, irq=0)\n\n"
 	"Connects the object to the specified PLC device.\n"
-	"open(X,Y) will open PLC at bus /dev/spidev<X>.<Y>\n");
+	"open(X,Y[,N1,N2,N3,N4]) will open PLC at bus /dev/spidev<X>.<Y>\n"
+	"with GPIOs configured accordingly");
 
 static PyObject *
 PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
 {
-    printf("Open\n");
-	int bus, device;
+	int bus, device, cs, ldo, rst, irq;
 	char path[PYPLC_MAX_BLOCK_SIZE];
 	uint8_t tmp8;
 	uint32_t tmp32;
-	static char *kwlist[] = {"bus", "device", NULL};
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "ii:open", kwlist, &bus, &device))
+	static char *kwlist[] = 
+		{"bus", "device", "cs", "ldo", "rst", "irq", NULL};
+	if (!PyArg_ParseTupleAndKeywords(args, kwds,
+		"ii|iiii:open", kwlist, &bus, &device,
+		&cs, &ldo, &rst, &irq))
 		return NULL;
 	if (snprintf(path, PYPLC_MAX_BLOCK_SIZE, 
             "/dev/spidev%d.%d", bus, device) >= PYPLC_MAX_BLOCK_SIZE) {
@@ -130,6 +130,19 @@ PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 	self->max_speed_hz = tmp32;
+
+	if(cs>0) {
+		self->pin[GPIO_INDEX_CS].num = cs;
+	}
+	if(ldo>0) {
+		self->pin[GPIO_INDEX_LDO].num = ldo;
+	}
+	if(rst>0) {
+		self->pin[GPIO_INDEX_RST].num = rst;
+	}
+	if(irq>0) {
+		self->pin[GPIO_INDEX_IRQ].num = irq;
+	}
 
     // GPIOs
 	for(int i=0; i<GPIO_INDEX_MAX; i++) {
@@ -165,13 +178,11 @@ PyPlc_setrxcb(PyPlcObject *self, PyObject *arg)
 {
 	PyObject *cb_func;
 
-	printf("enter\n");
 	if (!PyArg_ParseTuple(arg, "O:callback", &cb_func)) {
 		printf("cb err\n");
 		return NULL;
 	}
 
-	printf("cb %p\n", cb_func);
 	if (cb_func != NULL && !PyCallable_Check(cb_func))
 	{
 		PyErr_SetString(PyExc_TypeError, "Parameter must be callable");
@@ -239,7 +250,6 @@ PyPlc_tx(PyPlcObject *self, PyObject *args)
 static int
 PyPlc_init(PyPlcObject *self, PyObject *args, PyObject *kwds)
 {
-    printf("Init\n");
 	int bus = -1;
 	int client = -1;
 	static char *kwlist[] = {"bus", "client", NULL};

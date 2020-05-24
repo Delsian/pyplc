@@ -1,6 +1,10 @@
 Change Log
 ==========
 
+0.1.1
+-----
+- Put GPIO parameters to open()
+
 0.1.0
 -----
 - Callback accepts received packets

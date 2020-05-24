@@ -15,17 +15,19 @@ def cb(pkt):
 
 plc = pyplc.PyPlc()
 # Set additional pins
-plc.cs = 8
-plc.ldo = 20
-plc.rst = 1
+#plc.cs = 8
+#plc.ldo = 20
+#plc.rst = 1
 plc.irq = 22
 plc.setrxcb(cb)
 plc.speed=2000000
-plc.open(0,0)
+plc.open(0,0,8,20,1)
 a = bytearray("Test", "UTF-8")
 plc.tx(a)
 print(plc.ldo)
 print(plc.rst)
+print(plc.cs)
+print(plc.irq)
 plc.close()
 ```
 
@@ -41,9 +43,9 @@ Settings
 Methods
 -------
 
-    open(bus, device)
+    open(bus, device[,cs=0, ldo=0, rst=0, irq=0])
 
-Connects to the specified SPI device, opening `/dev/spidev<bus>.<device>` and `/sys/class/gpio/*`, checks PLC state and boots if neseccary
+Connects to the specified SPI device, opening `/dev/spidev<bus>.<device>` and `/sys/class/gpio/*`, checks PLC state and boots if neseccary.
 
     tx(bytearray)
 
