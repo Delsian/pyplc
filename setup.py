@@ -34,7 +34,7 @@ classifiers = ['Development Status :: 2 - Pre-Alpha',
                'Topic :: System :: Hardware :: Hardware Drivers'] 
 
 setup(name='pyplc',
-      version           ='0.0.7',
+      version           ='0.1.0',
       description       ='Python API for PLC modem',
       author            ='Eug Krashtan',
       author_email      ='eug.krashtan@gmail.com',

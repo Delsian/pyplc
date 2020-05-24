@@ -113,6 +113,7 @@ static pl360_tx_config_t txconf;
 static pthread_t irq_thread;
 static pthread_t h_thread;
 static pthread_t t_thread;
+static pthread_t cb_thread;
 pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t handle_cond = PTHREAD_COND_INITIALIZER; 
 pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -143,14 +144,39 @@ typedef struct {
     uint8_t buf[8];
 } plc_pkt8_t;
 
+typedef struct {
+    PyPlcObject *self;
+    plc_pkt_t* pkt;
+} cb_thread_args;
+
 static void pl360_update_status(PyPlcObject *self) {
 	plc_pkt8_t pkt = {
 		.addr = ATPL360_STATUS_INFO_ID,
 		.len = INIT_PKT_DATA_SIZE,
 	};
 	pl360_datapkt(self, PLC_CMD_READ, (plc_pkt_t*)&pkt);
-    printf("size stat %d %p", sizeof(status), &status);
+    //printf("size stat %d %p", sizeof(status), &status);
 	memcpy(&status, pkt.buf, sizeof(status));
+}
+
+// Run Python callbacks in separate thread to avoid RX lock
+void *callback_thread(void *threadarg) {
+    cb_thread_args* args = (cb_thread_args*) threadarg;
+    PyObject *result;
+    PyGILState_STATE gstate;
+    gstate = PyGILState_Ensure();
+
+    result = PyObject_CallFunction(args->self->rxcb, 
+            "y#", (char*)args->pkt->buf,args->pkt->len );
+    if (result == NULL && PyErr_Occurred()){
+        PyErr_Print();
+        PyErr_Clear();
+    }
+    Py_XDECREF(result);
+
+    PyGILState_Release(gstate);
+    free(args->pkt);
+    pthread_exit(NULL);
 }
 
 void *tx_thread(void *threadarg) {
@@ -158,13 +184,14 @@ void *tx_thread(void *threadarg) {
     self->thread_running = 1;
     pthread_mutex_lock(&tx_lock);
     while (self->thread_running) {
-        printf("Wait tx\n");
 	    pthread_cond_wait(&tx_cond, &tx_lock);
-        printf("Call tx\n");
+
+        // Wait until we have unhandled interrupts
         while(self->events) {
 		    pthread_cond_signal(&handle_cond);
 		    usleep(1000);
 	    }
+
         if (txpkt) {
             txconf.data_len = txpkt->len;
             plc_pkt_t* parampkt = (plc_pkt_t*)malloc(sizeof(pl360_tx_config_t) + sizeof(plc_pkt_t));
@@ -190,18 +217,18 @@ void *tx_thread(void *threadarg) {
 
 void *handle_thread(void *threadarg) {
     PyPlcObject *self = (PyPlcObject *)threadarg;
+    static cb_thread_args cbargs;
     self->thread_running = 1;
     pthread_mutex_lock(&handle_lock);
     while (self->thread_running) {
-        printf("Wait cb\n");
 	    pthread_cond_wait(&handle_cond, &handle_lock);
         pthread_mutex_lock(&plc_lock);
         do {
-            printf("Call cb2\n");
 		    pl360_update_status(self);
-            printf("Ev %x\n", self->events);
+            //printf("Ev %x\n", self->events);
             if (self->events & ATPL360_TX_CFM_FLAG_MASK) {
                 // Handle TX confirm
+                // ToDo: resolve possible bug with unhandled TX
                 plc_pkt_t* cfmpkt = malloc(sizeof(plc_pkt_t) + ATPL360_CMF_PKT_SIZE);
                 cfmpkt->addr = ATPL360_TX_CFM_ID;
                 cfmpkt->len = ATPL360_CMF_PKT_SIZE;
@@ -234,10 +261,12 @@ void *handle_thread(void *threadarg) {
                 rxpkt->len = l;
                 pl360_datapkt(self, PLC_CMD_READ, rxpkt);
                 if (self->rxcb) {
-                    // Move to worker
-                    //(*data->rx_cb)(rxpkt);
-
-                    // !!!! FREEE !!!
+                    cbargs.self = self;
+                    cbargs.pkt = rxpkt;
+                    if (pthread_create(&cb_thread, 
+                            NULL, callback_thread, (void *)&cbargs) != 0) {
+                        free(rxpkt);
+                    }
                 } else {
                     free(rxpkt);
                 }
@@ -245,7 +274,7 @@ void *handle_thread(void *threadarg) {
         } while (self->events);
         pthread_mutex_unlock(&plc_lock);
         if (txpkt) {
-            // After unsuccessful lock
+            // After unsuccessful lock in TX thread
             pthread_cond_signal(&tx_cond);
         }
     }
@@ -261,9 +290,7 @@ void *poll_thread(void *threadarg) {
     char buf;
     self->thread_running = 1;
     while (self->thread_running) {
-        printf("epoll1\n");
         n = epoll_wait(epfd_thread, &events, 1, -1);
-        printf("epoll2 %d\n", n);
         if (n > 0) {
             lseek(events.data.fd, 0, SEEK_SET);
             if (read(events.data.fd, &buf, 1) != 1) {
@@ -271,7 +298,6 @@ void *poll_thread(void *threadarg) {
                 printf("IRQ error 1\n");
                 pthread_exit(NULL);
             }
-            printf("rx signal\n");
             pthread_cond_signal(&handle_cond);
         } else if (n == -1) {
             /*  If a signal is received while we are waiting,

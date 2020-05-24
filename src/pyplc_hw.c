@@ -200,7 +200,7 @@ void pl360_datapkt(PyPlcObject *self, plc_cmd_t cmd, plc_pkt_t* pkt)
 
 	uint16_t us_len_wr_rd = (((pkt->len + 1) >> 1) & PLC_LEN_MASK) | (cmd << PLC_WR_RD_POS);
 
-	printf("PLC len %d cmd %x addr %x\n", pkt->len, cmd, pkt->addr);
+	//printf("PLC len %d cmd %x addr %x\n", pkt->len, cmd, pkt->addr);
 	/* Check length */
 	if (!pkt->len) {
 		return;

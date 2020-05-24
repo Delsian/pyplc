@@ -10,16 +10,23 @@ Usage
 
 ```python
 import pyplc
+def cb(pkt):
+    print(pkt)
+
 plc = pyplc.PyPlc()
 # Set additional pins
 plc.cs = 8
 plc.ldo = 20
 plc.rst = 1
 plc.irq = 22
-plc.speed = 4000000
+plc.setrxcb(cb)
+plc.speed=2000000
 plc.open(0,0)
-to_send = [0x01, 0x02, 0x03]
-plc.xfer(to_send)
+a = bytearray("Test", "UTF-8")
+plc.tx(a)
+print(plc.ldo)
+print(plc.rst)
+plc.close()
 ```
 
 Settings
@@ -42,4 +49,10 @@ Connects to the specified SPI device, opening `/dev/spidev<bus>.<device>` and `/
 
 Transmits data packet over PLC bus
 
-    rx - ?? ToDo callback
+    setrxcb(cb)
+    
+Set callback to function accepts bytearray as argument
+
+    close()
+
+Close SPI connection and unexport all pins

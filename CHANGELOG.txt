@@ -1,6 +1,10 @@
 Change Log
 ==========
 
+0.1.0
+-----
+- Callback accepts received packets
+
 0.0.7
 -----
 - Working packet TX

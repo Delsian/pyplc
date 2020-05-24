@@ -157,30 +157,33 @@ PyPlc_open(PyPlcObject *self, PyObject *args, PyObject *kwds)
 }
 
 PyDoc_STRVAR(PyPlcRxCbDoc,
-	"setrxcb(gpio, cb=None) -> None\n\n"
-	"Set callback function to call on packet Rx\n"
-	"gpio - IRQ pin number\n");
+	"setrxcb(Cb) -> None\n\n"
+	"Set callback function to call on packet Rx\n");
 
 static PyObject *
-PyPlc_setrxcb(PyPlcObject *self, PyObject *args, PyObject *kwargs)
+PyPlc_setrxcb(PyPlcObject *self, PyObject *arg)
 {
-	int gpio;
 	PyObject *cb_func;
-	char *kwlist[] = {"gpio", "callback", NULL};
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|i", kwlist, &gpio, &cb_func))
+	printf("enter\n");
+	if (!PyArg_ParseTuple(arg, "O:callback", &cb_func)) {
+		printf("cb err\n");
 		return NULL;
+	}
 
+	printf("cb %p\n", cb_func);
 	if (cb_func != NULL && !PyCallable_Check(cb_func))
 	{
 		PyErr_SetString(PyExc_TypeError, "Parameter must be callable");
 		return NULL;
 	}
 
+	Py_XINCREF(cb_func);         /* Add a reference to new callback */
+	if(self->rxcb) {
+		Py_XDECREF(self->rxcb);  /* Dispose of previous callback */
+	}
 	self->rxcb = cb_func;
-	self->pin[GPIO_INDEX_IRQ].num = gpio;
-	gpio_setup(GPIO_IRQ, GPIO_DIR_INPUT);
-
+	
 	Py_INCREF(Py_None);
 	return Py_None;
 }
@@ -247,6 +250,10 @@ PyPlc_init(PyPlcObject *self, PyObject *args, PyObject *kwds)
 
     gpios_init(self);
 
+	// Enable GIL for pthreads
+	if (!PyEval_ThreadsInitialized())
+		PyEval_InitThreads();
+
 	if (bus >= 0) {
 		PyPlc_open(self, args, kwds);
 		if (PyErr_Occurred())
@@ -264,7 +271,6 @@ PyDoc_STRVAR(PyPlcObjectType_doc,
 static
 PyObject *PyPlc_enter(PyObject *self, PyObject *args)
 {
-    printf("Enter\n");
     if (!PyArg_ParseTuple(args, ""))
         return NULL;
 
