@@ -25,6 +25,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdlib.h>
 #include "pyplc.h"
+#include "threadqueue.h"
 
 #pragma pack(push,1)
 
@@ -109,7 +110,13 @@ typedef struct __attribute__((__packed__)) {
 /* Init packet data size */
 #define INIT_PKT_DATA_SIZE (8)
 
-static pl360_tx_config_t txconf;
+typedef struct {
+    uint16_t len;
+    uint16_t addr;
+    pl360_tx_config_t conf;
+} txconf_t;
+static txconf_t txcf;
+
 static pthread_t irq_thread;
 static pthread_t h_thread;
 static pthread_t t_thread;
@@ -122,6 +129,7 @@ pthread_mutex_t plc_lock = PTHREAD_MUTEX_INITIALIZER;
 static int epfd_thread = -1;
 static status_t status;
 static plc_pkt_t* txpkt; // Packet queued to transmit
+static struct threadqueue queue;
 
 void pl360_tx(PyPlcObject *self, uint8_t* buf, int len) {
     assert(len<=PYPLC_MAX_BLOCK_SIZE);
@@ -144,11 +152,6 @@ typedef struct {
     uint8_t buf[8];
 } plc_pkt8_t;
 
-typedef struct {
-    PyPlcObject *self;
-    plc_pkt_t* pkt;
-} cb_thread_args;
-
 static void pl360_update_status(PyPlcObject *self) {
 	plc_pkt8_t pkt = {
 		.addr = ATPL360_STATUS_INFO_ID,
@@ -161,21 +164,29 @@ static void pl360_update_status(PyPlcObject *self) {
 
 // Run Python callbacks in separate thread to avoid RX lock
 void *callback_thread(void *threadarg) {
-    cb_thread_args* args = (cb_thread_args*) threadarg;
+    PyPlcObject *self = (PyPlcObject *)threadarg;
     PyObject *result;
     PyGILState_STATE gstate;
-    gstate = PyGILState_Ensure();
+    struct threadmsg msg;
+    while (self->thread_running) {
+        thread_queue_get(&queue, NULL, &msg);
+        plc_pkt_t* pkt = (plc_pkt_t*) msg.data;
+        if(pkt) {
+            gstate = PyGILState_Ensure();
 
-    result = PyObject_CallFunction(args->self->rxcb, 
-            "y#", (char*)args->pkt->buf,args->pkt->len );
-    if (result == NULL && PyErr_Occurred()){
-        PyErr_Print();
-        PyErr_Clear();
+            result = PyObject_CallFunction(self->rxcb, 
+                    "y#", (char*)pkt->buf,pkt->len );
+            if (result == NULL && PyErr_Occurred()){
+                PyErr_Print();
+                PyErr_Clear();
+            }
+            Py_XDECREF(result);
+
+            PyGILState_Release(gstate);
+            free(pkt);
+        }
     }
-    Py_XDECREF(result);
-
-    PyGILState_Release(gstate);
-    free(args->pkt);
+    thread_queue_cleanup(&queue, 1);
     pthread_exit(NULL);
 }
 
@@ -193,21 +204,15 @@ void *tx_thread(void *threadarg) {
 	    }
 
         if (txpkt) {
-            txconf.data_len = txpkt->len;
-            plc_pkt_t* parampkt = (plc_pkt_t*)malloc(sizeof(pl360_tx_config_t) + sizeof(plc_pkt_t));
-            assert(parampkt);
-            parampkt->addr = ATPL360_TX_PARAM_ID;
-            parampkt->len = sizeof(pl360_tx_config_t);
-            memcpy(parampkt->buf,&txconf,sizeof(pl360_tx_config_t));
+            txcf.conf.data_len = txpkt->len;
             // Skip until RX complete
             if(pthread_mutex_trylock(&plc_lock) == 0) {
-                pl360_datapkt(self, PLC_CMD_WRITE, parampkt);
+                pl360_datapkt(self, PLC_CMD_WRITE, (uint8_t*)&txcf);
                 pl360_datapkt(self, PLC_CMD_WRITE, txpkt);
                 free(txpkt);
                 txpkt = NULL;
             }
             pthread_mutex_unlock(&plc_lock);
-            free(parampkt);
         }
     }
     pthread_mutex_unlock(&tx_lock);
@@ -217,8 +222,9 @@ void *tx_thread(void *threadarg) {
 
 void *handle_thread(void *threadarg) {
     PyPlcObject *self = (PyPlcObject *)threadarg;
-    static cb_thread_args cbargs;
     self->thread_running = 1;
+    thread_queue_init(&queue);
+    pthread_create(&cb_thread, NULL, callback_thread, (void *)self);
     pthread_mutex_lock(&handle_lock);
     while (self->thread_running) {
 	    pthread_cond_wait(&handle_cond, &handle_lock);
@@ -261,12 +267,7 @@ void *handle_thread(void *threadarg) {
                 rxpkt->len = l;
                 pl360_datapkt(self, PLC_CMD_READ, rxpkt);
                 if (self->rxcb) {
-                    cbargs.self = self;
-                    cbargs.pkt = rxpkt;
-                    if (pthread_create(&cb_thread, 
-                            NULL, callback_thread, (void *)&cbargs) != 0) {
-                        free(rxpkt);
-                    }
+                    thread_queue_add(&queue, rxpkt);
                 } else {
                     free(rxpkt);
                 }
@@ -387,16 +388,18 @@ int pl360_init(PyPlcObject *self) {
 
 	/* Prepare default TX config */
 	const uint8_t tonemap[] = PL360_IF_DEFAULT_TONE_MAP;
-	txconf.tx_time = 0;
-	memcpy(txconf.tone_map, tonemap, sizeof(tonemap));
+	txcf.conf.tx_time = 0;
+	memcpy(txcf.conf.tone_map, tonemap, sizeof(tonemap));
 
-	txconf.tx_mode =  TX_MODE_RELATIVE; // uc_tx_mode
-	txconf.tx_time = 0x3E8;
-	txconf.tx_power =  PL360_IF_TX_POWER; // uc_tx_power
+	txcf.conf.tx_mode =  TX_MODE_RELATIVE; // uc_tx_mode
+	txcf.conf.tx_time = 0x3E8;
+	txcf.conf.tx_power =  PL360_IF_TX_POWER; // uc_tx_power
 
-	txconf.mod_type =  MOD_TYPE_BPSK; // uc_mod_type
-	txconf.mod_scheme =  MOD_SCHEME_DIFFERENTIAL; // uc_mod_scheme
-	txconf.uc_delimiter_type =  DT_SOF_NO_RESP; // uc_delimiter_type
+	txcf.conf.mod_type =  MOD_TYPE_BPSK; // uc_mod_type
+	txcf.conf.mod_scheme =  MOD_SCHEME_DIFFERENTIAL; // uc_mod_scheme
+	txcf.conf.uc_delimiter_type =  DT_SOF_NO_RESP; // uc_delimiter_type
+    txcf.addr = ATPL360_TX_PARAM_ID;
+    txcf.len = sizeof(pl360_tx_config_t);
     Py_END_ALLOW_THREADS
 
     // TX/RX handlers

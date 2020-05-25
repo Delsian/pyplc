@@ -34,13 +34,13 @@ classifiers = ['Development Status :: 2 - Pre-Alpha',
                'Topic :: System :: Hardware :: Hardware Drivers'] 
 
 setup(name='pyplc',
-      version           ='0.1.1',
+      version           ='0.1.2',
       description       ='Python API for PLC modem',
       author            ='Eug Krashtan',
       author_email      ='eug.krashtan@gmail.com',
       keywords          = 'Raspberry Pi PLC PL360',
       license           = 'MIT',
-      ext_modules       =[Extension('pyplc', ['src/pyplc.c','src/pyplc_hw.c','src/pyplc_if.c'], include_dirs=['src'])],
+      ext_modules       =[Extension('pyplc', ['src/pyplc.c','src/pyplc_hw.c','src/pyplc_if.c','src/threadqueue.c'], include_dirs=['src'])],
       py_modules        =['pyplc'],
       classifiers       = classifiers
 )
